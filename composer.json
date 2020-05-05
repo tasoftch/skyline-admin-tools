@@ -1,6 +1,6 @@
 {
-  "name": "tasoft/phpstorm-template",
-  "license": "MIT",
+  "name": "skyline-admin/tools",
+  "license": "BSD-3-Clause",
   "authors": [
     {
       "name": "Thomas Abplanalp",
@@ -9,11 +9,12 @@
   ],
   "autoload": {
     "psr-4": {
-      "TASoft\\" : "src"
+      "Skyline\\Admin\\Tool\\" : "src"
     }
   },
   "require" : {
-    "php": "^7.2"
+    "php": "^7.2",
+    "skyline/cms-security": "^0.8"
   },
   "require-dev": {
     "phpunit/phpunit": "^6"

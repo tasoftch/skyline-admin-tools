@@ -10,11 +10,15 @@
   "autoload": {
     "psr-4": {
       "Skyline\\Admin\\Tool\\" : "src"
-    }
+    },
+    "files": [
+      "Constants.php"
+    ]
   },
   "require" : {
     "php": "^7.2",
-    "skyline/cms-security": "^0.8"
+    "skyline/cms-security": "^0.8",
+	"ext-pdo": "*"
   },
   "require-dev": {
     "phpunit/phpunit": "^6"

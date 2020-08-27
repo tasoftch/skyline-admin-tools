@@ -34,17 +34,32 @@
 
 namespace Skyline\Admin\Tool;
 
+use Skyline\Admin\Tool\Exception\InternalException;
 use Skyline\CMS\Security\Authentication\AuthenticationServiceFactory;
 use Skyline\CMS\Security\Tool\Event\UserEvent;
 use Skyline\CMS\Security\Tool\PasswordResetTool;
 use Skyline\CMS\Security\UserSystem\User;
 use Skyline\Kernel\Service\SkylineServiceManager;
 use Skyline\Security\Authentication\AuthenticationService;
+use Skyline\Security\Identity\IdentityService;
 use Skyline\Security\User\UserInterface;
+use Symfony\Component\HttpFoundation\Request;
 use TASoft\Service\ServiceManager;
+use TASoft\Util\PDOResourceInterface;
+use Throwable;
 
 class UserTool extends \Skyline\CMS\Security\Tool\UserTool
 {
+	const ATTRIBUTE_PRENAME = 'prename';
+	const ATTRIBUTE_SURNAME = 'surname';
+	const ATTRIBUTE_EMAIL = 'email';
+
+	const ATTRIBUTE_INTERNAL = 'internal';
+	const ATTRIBUTE_LOGIN_WITH_EMAIL = 'lw-email';
+
+	const ATTRIBUTE_GROUPS = 'groups';
+	const ATTRIBUTE_ROLES = 'roles';
+
 	private $loadedUsers = [];
 
 	/** @var UserInterface|null */
@@ -97,21 +112,39 @@ class UserTool extends \Skyline\CMS\Security\Tool\UserTool
 	/**
 	 * Creates a new user (if multiple user system is enabled)
 	 *
+	 * Additional to username and credential you can specify user attributes like email address or surname.
+	 * It is also possible to pass groups and/or roles to directly assign.
+	 *
+	 * If $install is true, the new user gets transmitted as a simulation of a HTML Form login.
+	 *
 	 * @param string $username
 	 * @param string $plainCredential
+	 * @param array|string[] $attributes
+	 * @param bool $install
 	 * @param int|null $errorCode
 	 * @return UserInterface|null
 	 *
+	 * @throws Throwable
+	 * @throws Throwable
 	 */
-	public function createUser(string $username, string $plainCredential, int &$errorCode = NULL): ?UserInterface {
+	public function createUser(string $username, string $plainCredential, array $attributes = [], bool $install = false, int &$errorCode = NULL): ?UserInterface {
 		/** @var PasswordResetTool $pwt */
 		$pwt = ServiceManager::generalServiceManager()->get( PasswordResetTool::SERVICE_NAME );
 		if(!$pwt)
 			return NULL;
 
-		$this->getPDO()->inject("INSERT INTO SKY_USER (username, credentials) VALUES (?, ?)")->send([
+		$options = 0;
+		if((isset($attributes[static::ATTRIBUTE_EMAIL]) && ($attributes[static::ATTRIBUTE_LOGIN_WITH_EMAIL] ?? true)) || ($attributes[static::ATTRIBUTE_LOGIN_WITH_EMAIL] ?? false)) {
+			$options |= User::OPTION_CAN_LOGIN_WITH_MAIL;
+		}
+
+		$this->getPDO()->inject("INSERT INTO SKY_USER (username, credentials, email, prename, surname, options) VALUES (?, ?, ?, ?, ?, ?)")->send([
 			$username,
-			'#'
+			'#',
+			$attributes[ static::ATTRIBUTE_EMAIL ] ?? "",
+			$attributes[ static::ATTRIBUTE_PRENAME ] ?? "",
+			$attributes[ static::ATTRIBUTE_SURNAME ] ?? "",
+			$options
 		]);
 		if($user = $this->getUser( $username )) {
 			if($pwt->updateUserPassword($user, $plainCredential, $errorCode)) {
@@ -120,6 +153,33 @@ class UserTool extends \Skyline\CMS\Security\Tool\UserTool
 					$e->setUser($user);
 					SkylineServiceManager::getEventManager()->trigger(SKY_EVENT_USER_ADD, $e, $user, $errorCode);
 				}
+
+				if(is_array($groups = $attributes[static::ATTRIBUTE_GROUPS] ?? NULL)) {
+					$oldU = $this->getUser();
+					$this->setCurrentUser($user);
+					$this->assignGroups( $groups, false );
+					$this->setCurrentUser($oldU);
+				}
+
+				if(is_array($roles = $attributes[static::ATTRIBUTE_ROLES] ?? NULL)) {
+					$oldU = $this->getUser();
+					$this->setCurrentUser($user);
+					$this->assignRoles( $roles, false );
+					$this->setCurrentUser($oldU);
+				}
+
+				if($attributes[static::ATTRIBUTE_INTERNAL] ?? false) {
+					$op = User::OPTION_INTERNAL;
+
+					$this->getPDO()->inject("UPDATE SKY_USER SET options = options | $op WHERE username = ?")->send([
+						$username
+					]);
+				}
+
+				if($install) {
+					$this->loginWithCredentials($username, $plainCredential);
+				}
+
 				return $user;
 			}
 			$this->getPDO()->inject("DELETE FROM SKY_USER WHERE username = ?")->send([
@@ -130,12 +190,82 @@ class UserTool extends \Skyline\CMS\Security\Tool\UserTool
 	}
 
 	/**
+	 * Reset and installs a new identity with a given username and credential using the HTML Form challenge.
+	 *
+	 * Tecnically this method updates the $_POST fields identified by the service management parameters and also the current HTTP requests post fields with the new credentials.
+	 *
+	 * @param string $username
+	 * @param string $plainCredential
+	 * @return UserInterface|null
+	 */
+	public function loginWithCredentials(string $username, string $plainCredential): ?UserInterface {
+		$sm = ServiceManager::generalServiceManager();
+
+		$tnf = $sm->getParameter("security.http.post.tokenName");
+		$pwf = $sm->getParameter("security.http.post.credentialName");
+		/** @var Request $req */
+		$req = $sm->serviceExists('request') ? $sm->get("request") : NULL;
+		if($req&&$tnf&&$pwf) {
+			$is = $this->getIdentityService();
+			if($is instanceof IdentityService)
+				$is->resetIdentityCache();
+
+			$req->request->set($tnf, $_POST[$tnf] = $username);
+			$req->request->set($pwf, $_POST[$pwf] = $plainCredential);
+			return $this->getUser();
+		}
+		return NULL;
+	}
+
+	/**
+	 * @param $user
+	 * @param bool $silent
+	 * @return bool|null
+	 */
+	protected function checkInternal($user, bool $silent = false): ?bool {
+		if(is_object($user) && method_exists($user, 'getId'))
+			$userd = $user->getId();
+		elseif($user instanceof UserInterface)
+			$userd = $user->getUsername();
+		elseif(is_scalar($user))
+			$userd = $user;
+		else
+			return NULL;
+
+		$raise = function($code, $msg) use ($user, $silent) {
+			if(!$silent) {
+				throw (new InternalException($msg, $code))->setObject($user);
+			}
+			return false;
+		};
+
+		$options = 0;
+		if(is_string($userd)) {
+			$options = $this->getPDO()->selectFieldValue("SELECT options FROM SKY_USER WHERE username = ? LIMIT 1", 'options', [$userd]) * 1;
+		} elseif(is_numeric($userd)) {
+			$options = $this->getPDO()->selectFieldValue("SELECT options FROM SKY_USER WHERE id = $userd LIMIT 1", 'options') * 1;
+		} else
+			return NULL;
+
+		if($options & User::OPTION_INTERNAL) {
+			if(!$silent) {
+				throw (new InternalException('User is internal and can not be modified', 403))->setObject($user);
+			}
+			return true;
+		}
+
+		return false;
+	}
+
+	/**
 	 * Removes a user from the system
 	 *
 	 * @param UserInterface $user
-	 * @throws \Throwable
+	 * @throws Throwable
 	 */
 	public function removeUser(UserInterface $user) {
+		$this->checkInternal($user);
+
 		if(!$this->disableEvents) {
 			$e = new UserEvent();
 			$e->setUser($user);
@@ -164,14 +294,17 @@ class UserTool extends \Skyline\CMS\Security\Tool\UserTool
 	 * Makes membership to specified groups for the current user.
 	 *
 	 * @param array|null $groups
+	 * @param bool $invalidateCurrentSession
 	 * @return bool
-	 * @throws \Throwable
+	 * @throws Throwable
 	 */
-	public function assignGroups(array $groups = NULL) {
+	public function assignGroups(array $groups = NULL, bool $invalidateCurrentSession = true) {
 		if($uid = $this->getUserID()) {
+			$this->checkInternal($uid);
+
 			$gt = ServiceManager::generalServiceManager()->get(\Skyline\CMS\Security\Tool\UserGroupTool::SERVICE_NAME);
 			if($gt instanceof \Skyline\CMS\Security\Tool\UserGroupTool) {
-				if($this->getPDO()->transaction(function() use ($uid, &$groups, $gt) {
+				if($this->getPDO()->transaction(function() use ($uid, &$groups, $gt, $invalidateCurrentSession) {
 					$this->getPDO()->exec("DELETE FROM SKY_USER_GROUP WHERE user = $uid");
 
 					if($groups) {
@@ -183,8 +316,10 @@ class UserTool extends \Skyline\CMS\Security\Tool\UserTool
 						}
 					}
 
-					$o = User::OPTION_INVALIDATE_SESSION;
-					$this->getPDO()->exec("UPDATE SKY_USER SET options = (options | $o) WHERE id = $uid");
+					if($invalidateCurrentSession) {
+						$o = User::OPTION_INVALIDATE_SESSION;
+						$this->getPDO()->exec("UPDATE SKY_USER SET options = (options | $o) WHERE id = $uid");
+					}
 				})) {
 					if(!$this->disableEvents) {
 						$e = new UserEvent();
@@ -203,14 +338,17 @@ class UserTool extends \Skyline\CMS\Security\Tool\UserTool
 	 * Assigns new roles to the current user.
 	 *
 	 * @param array|null $roles
+	 * @param bool $invalidateCurrentSession
 	 * @return bool
-	 * @throws \Throwable
+	 * @throws Throwable
 	 */
-	public function assignRoles(array $roles = NULL) {
+	public function assignRoles(array $roles = NULL, bool $invalidateCurrentSession = true) {
 		if($uid = $this->getUserID()) {
+			$this->checkInternal($uid);
+
 			$gt = ServiceManager::generalServiceManager()->get(\Skyline\CMS\Security\Tool\UserRoleTool::SERVICE_NAME);
 			if($gt instanceof \Skyline\CMS\Security\Tool\UserRoleTool) {
-				if($this->getPDO()->transaction(function() use ($uid, &$roles, $gt) {
+				if($this->getPDO()->transaction(function() use ($uid, &$roles, $gt, $invalidateCurrentSession) {
 					$this->getPDO()->exec("DELETE FROM SKY_USER_ROLE WHERE user = $uid");
 
 					if($roles) {
@@ -222,8 +360,10 @@ class UserTool extends \Skyline\CMS\Security\Tool\UserTool
 						}
 					}
 
-					$o = User::OPTION_INVALIDATE_SESSION;
-					$this->getPDO()->exec("UPDATE SKY_USER SET options = (options | $o) WHERE id = $uid");
+					if($invalidateCurrentSession) {
+						$o = User::OPTION_INVALIDATE_SESSION;
+						$this->getPDO()->exec("UPDATE SKY_USER SET options = (options | $o) WHERE id = $uid");
+					}
 				})) {
 					if(!$this->disableEvents) {
 						$e = new UserEvent();

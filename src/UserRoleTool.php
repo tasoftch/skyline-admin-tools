@@ -122,15 +122,25 @@ class UserRoleTool extends \Skyline\CMS\Security\Tool\UserRoleTool
 	private function invalidateUserSession(int $roleID) {
 		$o = User::OPTION_INVALIDATE_SESSION;
 
-		$this->PDO->exec("UPDATE SKY_USER
-				JOIN SKY_USER_ROLE ON user = id
-				SET options = (options | $o)
-				WHERE role = $roleID");
-		$this->PDO->exec("UPDATE SKY_USER
-				JOIN SKY_USER_GROUP ON user = id
-				JOIN SKY_GROUP_ROLE SGR on SKY_USER_GROUP.groupid = SGR.groupid
-				SET options = (options | $o)
-				WHERE role = $roleID");
+		$users = [];
+		foreach($this->PDO->select("SELECT
+SKY_USER_ROLE.user as u1,
+       SKY_USER_GROUP.user as u2
+FROM SKY_ROLE
+LEFT JOIN SKY_GROUP_ROLE ON SKY_GROUP_ROLE.role = id
+LEFT JOIN SKY_USER_GROUP ON SKY_USER_GROUP.groupid = SKY_GROUP_ROLE.groupid
+LEFT JOIN SKY_USER_ROLE ON SKY_USER_ROLE.role = id
+WHERE id = $roleID") as $record) {
+			if($record['u1'] && !in_array($record['u1'], $users))
+				$users[] = $record['u1'];
+			if($record['u2'] && !in_array($record['u2'], $users))
+				$users[] = $record['u2'];
+		}
+
+		if($users) {
+			$users = implode("|", $users);
+			$this->PDO->exec("UPDATE SKY_USER SET options = (options | $o) WHERE id IN ($users)");
+		}
 	}
 
 	/**

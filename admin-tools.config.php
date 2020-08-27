@@ -32,6 +32,7 @@
  *
  */
 
+use Skyline\Admin\Tool\BruteForceTool;
 use Skyline\Admin\Tool\UserGroupTool;
 use Skyline\Admin\Tool\UserRoleTool;
 use Skyline\Admin\Tool\UserTool;
@@ -48,6 +49,12 @@ return [
 		],
 		UserRoleTool::SERVICE_NAME => [
 			AbstractFileConfiguration::SERVICE_CLASS => UserRoleTool::class
+		],
+		BruteForceTool::SERVICE_NAME => [
+			AbstractFileConfiguration::SERVICE_CLASS => BruteForceTool::class,
+			AbstractFileConfiguration::SERVICE_INIT_ARGUMENTS => [
+				'file' => '%security.persistence%',
+			]
 		]
 	]
 ];

@@ -71,10 +71,14 @@ class UserGroupTool extends \Skyline\CMS\Security\Tool\UserGroupTool
 	private function invalidateUserSession(int $groupID) {
 		$o = User::OPTION_INVALIDATE_SESSION;
 
-		$this->PDO->exec("UPDATE SKY_USER
-				JOIN SKY_USER_GROUP ON user = id
-				SET options = (options | $o)
-				WHERE groupid = $groupID");
+		$users = array_map(function($record) {
+			return $record['user'];
+		}, iterator_to_array($this->PDO->select("SELECT user FROM SKY_USER_GROUP WHERE groupid = $groupID")));
+
+		if($users) {
+			$users = implode("|", $users);
+			$this->PDO->exec("UPDATE SKY_USER SET options = (options | $o) WHERE id IN ($users)");
+		}
 	}
 
 	/**
